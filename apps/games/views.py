@@ -1,64 +1,75 @@
 # Python
 from typing import Optional
+from datetime import datetime, date
 
 # DRF
-from rest_framework import viewsets , filters
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
-from rest_framework.response import Response
-from rest_framework.validators import ValidationError
+from rest_framework.response import Response as JsonResponse
+from rest_framework.viewsets import ViewSet
+
+# Django
+from django.core.exceptions import ValidationError
+from django.db.models import query
 
 # First party
-from games.models import Game
+from abstracts.mixins import (
+    ObjectMixin,
+    ResponseMixin
+)
+from games.models import (
+    Game,
+    Subscribe
+)
+from games.tasks import do_test, cancel_subcribe
 from games.serializers import (
     GameCreateSerializer,
     GameSerializer
 )
+# Local
+from .permissions import GamePermission
 
 
-class GameViewSet(viewsets.ModelViewSet):
-    
+class GameViewSet(ResponseMixin, ObjectMixin, ViewSet):
+    """
+    ViewSet for Game model.
+    """
+    permission_classes = (
+        GamePermission,
+    )
     queryset = Game.objects.all()
-    serializer_class = GameSerializer
-    filter_backends = [filters.OrderingFilter]
-    ordering_fields = ['price']
 
-    def list(self, request, *args, **kwargs):
-        min_price = request.query_params.get('min_price')
-        max_price = request.query_params.get('max_price')
-
-        queryset = self.queryset
-        if min_price is not None:
-            queryset = queryset.filter(price__gte=min_price)
-        if max_price is not None:
-            queryset = queryset.filter(price__lte=max_price)
-
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+    def list(
+        self,
+        request: Request,
+        *args: tuple,
+        **kwargs: dict
+    ) -> JsonResponse:
+        serializer: GameSerializer = \
+            GameSerializer(
+                instance=self.queryset,
+                many=True
+            )
+        return self.json_response(serializer.data)
 
     def retrieve(
         self,
         request: Request,
         pk: Optional[int] = None
-    ) -> Response:
-        try:
-            game = self.queryset.get(id=pk)
-        except Game.DoesNotExist:
-            raise ValidationError(
-                'Object not found!',
-                code=404
-            )
+    ) -> JsonResponse:
+        game = self.get_object(self.queryset, pk)
         serializer: GameSerializer = \
-            GameSerializer(
-                instance=game
-            )
-        return Response(data=serializer.data)
+            GameSerializer(instance=game)
+
+        return self.json_response(serializer.data)
 
     def create(
         self,
         request: Request,
         *args: tuple,
         **kwargs: dict
-    ) -> Response:
+    ) -> JsonResponse:
         serializer: GameCreateSerializer = \
             GameCreateSerializer(
                 data=request.data
@@ -67,57 +78,33 @@ class GameViewSet(viewsets.ModelViewSet):
             raise_exception=True
         )
         game: Game = serializer.save()
-        return Response(
-            data={
-                'status': 'ok',
-                'message': f'Game {game.name} is created! Id: {game.pk}'
-            }
-        )
+
+        return self.json_response(f'{game.name} is created. ID: {game.id}')
 
     def update(
         self,
         request: Request,
         pk: str
-    ) -> Response:
-        """Обновление игры."""
-
-        try:
-            game = self.queryset.get(id=pk)
-        except Game.DoesNotExist:
-            raise ValidationError('Game not found', code=400)
-
+    ) -> JsonResponse:
+        game = self.get_object(self.queryset, pk)
         serializer: GameSerializer = \
             GameSerializer(
                 instance=game,
                 data=request.data
             )
         if not serializer.is_valid():
-            return Response(
-                data={
-                    'status': 'Warning',
-                    'message': f'Warning with: {game.name}'
-                }
+            return self.json_response(
+                f'{game.name} wasn\'t updated', 'Warning'
             )
         serializer.save()
-        return Response(
-            data={
-                'status': 'OK',
-                'message': f'Game: {game.name} was updated'
-            }
-        )
+        return self.json_response(f'{game.name} was updated')
 
     def partial_update(
         self,
         request: Request,
         pk: str
-    ) -> Response:
-        """Частичное обновление игры."""
-
-        try:
-            game = self.queryset.get(id=pk)
-        except Game.DoesNotExist:
-            raise ValidationError('Game not found', code=400)
-
+    ) -> JsonResponse:
+        game = self.get_object(self.queryset, pk)
         serializer: GameSerializer = \
             GameSerializer(
                 instance=game,
@@ -125,41 +112,78 @@ class GameViewSet(viewsets.ModelViewSet):
                 partial=True
             )
         if not serializer.is_valid():
-            return Response(
-                data={
-                    'status': 'Warning',
-                    'message': f'Warning with: {game.name}'
-                }
+            return self.json_response(
+                f'{game.name} wasn\'t partially-updated', 'Warning'
             )
         serializer.save()
-        return Response(
-            data={
-                'status': 'OK',
-                'message': f'Game: {game.name} was updated'
-            }
-        )
+        return self.json_response(f'{game.name} was partially-updated')
 
     def destroy(
         self,
         request: Request,
         pk: str
-    ) -> Response:
-        """Удаление игры."""
-
+    ) -> JsonResponse:
         # TODO: мы будем проставлять
         #       ей статус 'datetime_deleted'
-        try:
-            game = self.queryset.get(id=pk)
-        except Game.DoesNotExist:
-            raise ValidationError('Game not found', code=400)
-        else:
-            name: str = game.name
-            game.delete()
+        #
+        game = self.get_object(self.queryset, pk)
+        name: str = game.name
+        game.delete()
 
-        return Response(
+        return self.json_response(f'{name} was deleted')
+
+    @action(
+        methods=['POST'],
+        detail=False
+    )
+    def show_hidden_games(self, request: Request) -> JsonResponse:
+        hidden_games: query.QuerySet = \
+            Game.objects.filter(is_hidden=True)
+
+        serializer: GameSerializer = \
+            GameSerializer(
+                instance=hidden_games,
+                many=True
+            )
+        return self.json_response(serializer.data)
+
+    @action(
+        methods=['POST'],
+        detail=False,
+        url_path='sub/game/(?P<pk>[^/.]+)'
+    )
+    def subscribe(self, request: Request, pk: int = None) -> JsonResponse:
+        game = self.get_object(
+            queryset=Game.objects.all(),
+            obj_id=pk
+        )
+        sub = Subscribe.objects.create(
+            user=request.user,
+            is_active=True,
+            game=game
+        )
+        cancel_subcribe.apply_async(
+            kwargs={'subcribe_id': sub.id},
+            countdown=60*60*24*30
+        )
+        return self.json_response(
             data={
-                'status': 'OK',
-                'message': f'Game {name} is deleted!'
+                "message": {
+                    "game_id": game.id,
+                    "subscribe_id": sub.id,
+                    "date_finished": sub.datetime_finished
+                }
             }
         )
-
+    
+    @action(
+        methods=['GET'], detail=False, url_path='sub/check/(?P<pk>[^/.]+)'
+    )
+    def check_subcribe(self, request: Request, pk: int = None):
+        do_test.apply_async(
+            kwargs={'game_id': pk}, 
+            countdown=30
+        )
+        return self.json_response(
+            data={"message": "ok"}
+        )

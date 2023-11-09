@@ -1,4 +1,8 @@
+# Python
+import datetime
+
 # Django
+from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator
 from django.db import models
 
@@ -26,6 +30,10 @@ class Game(models.Model):
         verbose_name='рейтинг',
         max_length=5
     )
+    is_hidden: bool = models.BooleanField(
+        verbose_name='скрыта ли',
+        default=False
+    )
 
     class Meta:
         ordering = ('-id',)
@@ -34,6 +42,31 @@ class Game(models.Model):
 
     def __str__(self) -> str:
         return f'{self.name} | {self.price:.2f}$'
+    
+
+class Subscribe(models.Model):
+    game: Game = models.ForeignKey(
+        to=Game,
+        related_name='subs',
+        on_delete=models.CASCADE
+    )
+    user: User = models.ForeignKey(
+        to=User,
+        related_name='subs',
+        on_delete=models.CASCADE
+    )
+    is_active: bool = models.BooleanField(
+        default=True
+    )
+    datetime_finished = models.DateField(
+        verbose_name='Дата завершения',
+        default=(datetime.datetime.today() + datetime.timedelta(days=30))
+    )
+
+    class Meta:
+        ordering = ('id',)
+        verbose_name = 'Подписка'
+        verbose_name_plural = 'Подписки'
 
 
 # Создать форму для создания игры и редактирования игры
